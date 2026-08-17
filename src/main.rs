@@ -72,6 +72,13 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     root::init_logging();
+    // Panics inside a tokio::spawn'd task are otherwise silent unless the
+    // JoinHandle is awaited (it isn't, for our background tasks) - without
+    // this hook, a panicked gossip/sync/metrics task just vanishes forever
+    // with zero indication anything went wrong.
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("PANIC in background task: {}", info);
+    }));
     let cli = Cli::parse();
 
     match cli.command {
@@ -104,6 +111,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
             let signing_key = root::load_or_create_signing_key(&cli.data_dir)?;
             let verifying_key = VerifyingKey::from(&signing_key);
+            let identity_b32 = base32::encode(base32::Alphabet::RFC4648 { padding: false }, verifying_key.as_bytes()).to_lowercase();
+            log::info!(
+                "This relay's identity is {}.root — share it as BOOTSTRAP_NODES={}@{} so \
+                 other operators can pin their first connection to this relay instead of TOFU-trusting it.",
+                identity_b32, external_addr, identity_b32
+            );
             // tls_public_key carries this relay's TLS certificate DER so peers can pin
             // future connections to it once they've learned this (signed) descriptor.
             let descriptor = root::RelayDescriptor::new(verifying_key, external_addr.parse()?, cert_der.clone(), &signing_key)?;

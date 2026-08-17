@@ -446,8 +446,12 @@ impl Directory {
     pub async fn add_relay(&self, descriptor: RelayDescriptor) -> bool {
         if descriptor.verify().is_err() { return false; }
         let mut write_guard = self.relays.write().await;
+        let is_new = !write_guard.contains_key(&descriptor.id);
         if let Some(existing) = write_guard.get(&descriptor.id) {
             if descriptor.last_updated <= existing.last_updated { return false; }
+        }
+        if is_new {
+            info!("Learned about a new relay at {} via gossip (directory now has {} relay(s))", descriptor.external_address, write_guard.len() + 1);
         }
         write_guard.insert(descriptor.id.clone(), descriptor);
         true
@@ -740,7 +744,23 @@ pub async fn connect_to_relay(addr: &str, client_config: Arc<ClientConfig>) -> R
 /// that exact certificate. Otherwise this falls back to `fallback_client_config`
 /// (normally an accept-any/TOFU config from `create_client_config`) and logs the
 /// gap -- this covers genuinely first-contact/bootstrap dials only.
+///
+/// The whole TCP-connect-plus-TLS-handshake is bounded to 10s. Neither
+/// `TcpStream::connect` nor a TLS handshake have any timeout of their own, so
+/// without this every caller (gossip, circuit building, rendezvous) could hang
+/// forever on a single unresponsive or half-open peer - and since most callers
+/// are inside a sequential loop, one stuck dial silently starves every
+/// subsequent tick/peer/circuit with no error ever logged. This bit us during
+/// development: a gossip task looked "dead" with zero further log output for
+/// minutes, no panic, nothing - just an unbounded await that never returned.
 pub async fn connect_to_peer(peer_addr: SocketAddr, fallback_client_config: Arc<ClientConfig>, directory: Option<&Arc<Directory>>) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Box<dyn Error + Send + Sync>> {
+    match time::timeout(time::Duration::from_secs(10), connect_to_peer_inner(peer_addr, fallback_client_config, directory)).await {
+        Ok(result) => result,
+        Err(_) => Err(format!("connect/handshake to {} timed out after 10s", peer_addr).into()),
+    }
+}
+
+async fn connect_to_peer_inner(peer_addr: SocketAddr, fallback_client_config: Arc<ClientConfig>, directory: Option<&Arc<Directory>>) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Box<dyn Error + Send + Sync>> {
     if let Some(dir) = directory {
         let known = dir.get_all_relays().await.into_iter()
             .find(|r| r.external_address == peer_addr && !r.tls_public_key.is_empty());
@@ -1665,17 +1685,62 @@ async fn establish_intro_points(
     intro_addrs
 }
 
-pub fn get_bootstrap_nodes() -> Result<Vec<SocketAddr>, Box<dyn Error + Send + Sync>> {
+/// A configured bootstrap/seed peer, optionally pinned to a known identity.
+///
+/// Without a pinned identity, the very first TLS connection to this address is
+/// trust-on-first-use (see `AcceptAnyServerCert`): nothing yet proves the peer
+/// at that address is who it claims to be. `expected_identity` closes that gap
+/// for pre-arranged bootstrap peers, the same way Tor bakes in directory
+/// authority fingerprints instead of blindly trusting whoever answers first.
+#[derive(Clone)]
+pub struct BootstrapNode {
+    pub addr: SocketAddr,
+    pub expected_identity: Option<VerifyingKey>,
+}
+
+/// Parses `BOOTSTRAP_NODES`, a comma-separated list of `ip:port` or
+/// `ip:port@<52-char-base32-identity>` entries (the identity is the same
+/// base32-of-pubkey string a relay logs as its own `.root` address at
+/// startup, minus the `.root` suffix). Entries without `@identity` fall back
+/// to TOFU on first contact, same as before this existed.
+pub fn get_bootstrap_nodes() -> Result<Vec<BootstrapNode>, Box<dyn Error + Send + Sync>> {
     let bootstrap_addrs = std::env::var("BOOTSTRAP_NODES")
         .unwrap_or_else(|_| "127.0.0.1:8444,127.0.0.1:8445".to_string());
-    
+
     let mut nodes = Vec::new();
-    for addr_str in bootstrap_addrs.split(',') {
-        if let Ok(mut addrs) = addr_str.to_socket_addrs() {
-            if let Some(addr) = addrs.next() {
-                nodes.push(addr);
-            }
-        }
+    for entry in bootstrap_addrs.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() { continue; }
+
+        let (addr_str, identity_str) = match entry.split_once('@') {
+            Some((a, id)) => (a, Some(id)),
+            None => (entry, None),
+        };
+
+        let addr = match addr_str.to_socket_addrs() {
+            Ok(mut addrs) => match addrs.next() {
+                Some(a) => a,
+                None => { log::warn!("Bootstrap entry '{}' resolved to no addresses, skipping", entry); continue; }
+            },
+            Err(e) => { log::warn!("Bootstrap entry '{}' failed to resolve: {}, skipping", entry, e); continue; }
+        };
+
+        let expected_identity = match identity_str {
+            Some(id) => match base32::decode(base32::Alphabet::RFC4648 { padding: false }, id) {
+                Some(bytes) if bytes.len() == 32 => {
+                    let mut key_bytes = [0u8; 32];
+                    key_bytes.copy_from_slice(&bytes);
+                    match VerifyingKey::from_bytes(&key_bytes) {
+                        Ok(k) => Some(k),
+                        Err(e) => { log::warn!("Bootstrap entry '{}' has an invalid pinned identity: {}, treating as unpinned (TOFU)", entry, e); None }
+                    }
+                }
+                _ => { log::warn!("Bootstrap entry '{}' has a malformed pinned identity, treating as unpinned (TOFU)", entry); None }
+            },
+            None => None,
+        };
+
+        nodes.push(BootstrapNode { addr, expected_identity });
     }
     Ok(nodes)
 }
@@ -1683,24 +1748,52 @@ pub fn get_bootstrap_nodes() -> Result<Vec<SocketAddr>, Box<dyn Error + Send + S
 /// Dials a single peer address, sends our gossip packet, and (best-effort) reads
 /// back a gossip reply, merging any learned relay descriptors into the directory
 /// and peer store.
+///
+/// If `expected_identity` is set (a pinned bootstrap peer), the reply is only
+/// trusted if it actually contains a validly-signed `RelayDescriptor` for that
+/// exact identity at this exact address - closing the TOFU gap for the very
+/// first connection a fresh node makes, since an attacker without the real
+/// operator's private key cannot forge a descriptor that passes this check.
+/// If the check fails, the entire response is discarded (nothing is merged).
 async fn gossip_with_addr(
     addr: SocketAddr,
     packet: &[u8],
     client_tls_config: Arc<ClientConfig>,
     directory: &Arc<Directory>,
     peer_store: &Arc<PeerStore>,
+    expected_identity: Option<VerifyingKey>,
 ) {
+    log::debug!("[gossip] gossip_with_addr({}) starting", addr);
+    // connect_to_peer has its own internal timeout; write_all still needs one
+    // here since a peer that accepts the handshake but never reads could hang
+    // this send forever otherwise.
     let mut stream = match connect_to_peer(addr, client_tls_config, Some(directory)).await {
         Ok(s) => s,
         Err(e) => { log::warn!("Gossip: failed to connect to {}: {}", addr, e); return; }
     };
-    if let Err(e) = stream.write_all(packet).await {
-        log::warn!("Gossip: failed to send to {}: {}", addr, e);
-        return;
+    log::debug!("[gossip] gossip_with_addr({}) connected, sending", addr);
+    match time::timeout(time::Duration::from_secs(5), stream.write_all(packet)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => { log::warn!("Gossip: failed to send to {}: {}", addr, e); return; }
+        Err(_) => { log::warn!("Gossip: send to {} timed out", addr); return; }
     }
+    log::debug!("[gossip] gossip_with_addr({}) sent, awaiting reply", addr);
     match time::timeout(time::Duration::from_secs(5), Packet::decapsulate(&mut stream)).await {
         Ok(Ok(reply_packet)) => {
             if let Ok(Message::Gossip(GossipMessage::Update(descriptors, hs_descriptors))) = bincode::deserialize::<Message>(&reply_packet.payload) {
+                if let Some(expected) = expected_identity {
+                    let proven = descriptors.iter().any(|d| {
+                        d.id == expected && d.external_address == addr && d.verify().is_ok()
+                    });
+                    if !proven {
+                        log::error!(
+                            "Gossip: peer at {} did NOT prove the pinned identity we expected for it \
+                             (possible MITM or misconfigured pin) - discarding its entire response",
+                            addr
+                        );
+                        return;
+                    }
+                }
                 for d in descriptors {
                     if directory.add_relay(d.clone()).await {
                         if let Ok(info) = PeerInfo::new(d) {
@@ -1722,6 +1815,7 @@ pub async fn start_gossip_task(our_relay_descriptor: RelayDescriptor, peer_store
     let mut interval = time::interval(time::Duration::from_secs(10));
     loop {
         interval.tick().await;
+        log::debug!("[gossip] start_gossip_task tick fired");
         directory.add_relay(our_relay_descriptor.clone()).await;
 
         let packet = match bincode::serialize(&Message::Gossip(GossipMessage::Update(
@@ -1734,19 +1828,22 @@ pub async fn start_gossip_task(our_relay_descriptor: RelayDescriptor, peer_store
 
         // Gossip to a random subset of already-known peers.
         let connected_peers = peer_store.get_all_peers().await;
+        log::debug!("[gossip] {} known peers to gossip to", connected_peers.len());
         let selected_peers: Vec<PeerInfo> = { let mut rng = thread_rng(); connected_peers.choose_multiple(&mut rng, 3).cloned().collect() };
         for peer in selected_peers {
-            gossip_with_addr(peer.descriptor.external_address, &packet, client_tls_config.clone(), &directory, &peer_store).await;
+            gossip_with_addr(peer.descriptor.external_address, &packet, client_tls_config.clone(), &directory, &peer_store, None).await;
         }
 
         // Also always try the configured bootstrap/seed nodes so a fresh node
         // with no known peers can still join the network.
         if let Ok(bootstrap_nodes) = get_bootstrap_nodes() {
-            for addr in bootstrap_nodes {
-                if addr == our_relay_descriptor.external_address { continue; }
-                gossip_with_addr(addr, &packet, client_tls_config.clone(), &directory, &peer_store).await;
+            log::debug!("[gossip] {} bootstrap nodes configured", bootstrap_nodes.len());
+            for node in bootstrap_nodes {
+                if node.addr == our_relay_descriptor.external_address { continue; }
+                gossip_with_addr(node.addr, &packet, client_tls_config.clone(), &directory, &peer_store, node.expected_identity).await;
             }
         }
+        log::debug!("[gossip] tick complete");
     }
 }
 
@@ -1776,12 +1873,12 @@ pub async fn start_directory_sync_task(peer_store: Arc<PeerStore>, directory: Ar
         let connected_peers = peer_store.get_all_peers().await;
         let selected_peers: Vec<PeerInfo> = { let mut rng = thread_rng(); connected_peers.choose_multiple(&mut rng, 3).cloned().collect() };
         for peer in selected_peers {
-            gossip_with_addr(peer.descriptor.external_address, &packet, client_tls_config.clone(), &directory, &peer_store).await;
+            gossip_with_addr(peer.descriptor.external_address, &packet, client_tls_config.clone(), &directory, &peer_store, None).await;
         }
 
         if let Ok(bootstrap_nodes) = get_bootstrap_nodes() {
-            for addr in bootstrap_nodes {
-                gossip_with_addr(addr, &packet, client_tls_config.clone(), &directory, &peer_store).await;
+            for node in bootstrap_nodes {
+                gossip_with_addr(node.addr, &packet, client_tls_config.clone(), &directory, &peer_store, node.expected_identity).await;
             }
         }
     }

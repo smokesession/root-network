@@ -138,6 +138,20 @@ The top-level `README.md`/`docker-compose.yml` (repo root) spins up a small loca
 
 There's no automatic seed-node list bundled with the code — for a real public network you'd publish a small number of stable, well-known relay addresses out-of-band (documentation, a website, etc.) for new operators to configure as `BOOTSTRAP_NODES`.
 
+### Pinning a bootstrap node's identity (closing the TOFU gap)
+
+By default, the very first connection to any bootstrap address is trust-on-first-use: nothing yet proves the peer answering at that address is who it's supposed to be. You can close this gap for pre-arranged bootstrap peers the same way Tor bakes in directory authority fingerprints — by pinning the expected identity:
+
+```
+BOOTSTRAP_NODES=203.0.113.5:8443@k67mxpr5yw2pc2fijselaxa2v6plffefjld4qpdqtscvtlzw2v7q
+```
+
+The identity is the same base32 string a relay logs as its own `.root` address at startup (minus the `.root` suffix) — every `node` prints a ready-to-share `BOOTSTRAP_NODES=...@...` line on startup specifically so operators can copy-paste it. Multiple entries, pinned or not, are comma-separated as usual.
+
+When an entry has a pin, the *response* from that bootstrap dial is only trusted if it actually contains a validly-signed `RelayDescriptor` for that exact identity at that exact address — an attacker without the real operator's private key cannot forge one. If the check fails, the entire response is discarded and an `ERROR`-level log line is emitted (`did NOT prove the pinned identity we expected for it`). Entries without a pin behave exactly as before (TOFU).
+
+This only protects pre-arranged bootstrap peers you have an out-of-band identity for. Peers discovered purely through gossip (not configured as pinned bootstrap nodes) still get TOFU on first contact, same as always.
+
 ## Vanity address tool usage
 
 ```bash

@@ -7,7 +7,13 @@
 # node that never talked to the HS directly, and that a hidden service
 # started cold (before any relay exists) recovers via retry once one appears.
 #
-# This exact scenario caught two real bugs during development:
+# It also proves the bootstrap-identity-pinning gate: a peer that can't prove
+# a pre-shared identity for a pinned bootstrap address gets its entire gossip
+# response discarded, closing the trust-on-first-use gap for pre-arranged
+# bootstrap peers (the same model Tor uses for directory authority
+# fingerprints).
+#
+# This exact scenario caught real bugs during development:
 #   - client/HS processes never syncing their directory with the network
 #   - HS intro-point selection never actually retrying
 #   - relays advertising an unreachable 0.0.0.0 external address
@@ -34,7 +40,7 @@ FAILURES=0
 
 cleanup() {
     step "Cleaning up test containers and network..."
-    docker rm -f rt-it-a rt-it-b rt-it-hs >/dev/null 2>&1 || true
+    docker rm -f rt-it-a rt-it-b rt-it-hs rt-it-c rt-it-e >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -111,6 +117,33 @@ docker run -d --name rt-it-b --network "$NET" --ip "$IP_B" \
 
 wait_for_log rt-it-b "published hidden service descriptor" \
     "relay B learns the HS descriptor via gossip through relay A (not direct contact)"
+
+# --- Scenario 3: bootstrap identity pinning ------------------------------
+step "Extracting relay A's real identity for the pinning test..."
+A_IDENTITY=$(docker logs rt-it-a 2>&1 | grep -oE '[a-z2-7]{52}\.root' | head -1 | sed 's/\.root$//')
+if [[ -z "$A_IDENTITY" ]]; then
+    fail "could not extract relay A's identity from its logs"
+    FAILURES=$(( FAILURES + 1 ))
+else
+    pass "extracted relay A identity: ${A_IDENTITY:0:12}..."
+
+    step "Starting relay C, pinned to A's CORRECT identity (should succeed)..."
+    docker run -d --name rt-it-c --network "$NET" --ip "${SUBNET_PREFIX}.13" \
+        -e RUST_LOG=info -e "BOOTSTRAP_NODES=${IP_A}:8443@${A_IDENTITY}" \
+        "$IMAGE" --data-dir /data node --addr 0.0.0.0:8443 --external-addr "${SUBNET_PREFIX}.13:8443" >/dev/null
+    wait_for_log rt-it-c "learned about a new relay at ${IP_A}" \
+        "relay C accepts A's gossip when the pin matches A's real identity"
+    docker rm -f rt-it-c >/dev/null 2>&1
+
+    step "Starting relay E, pinned to a WRONG identity for A's address (should be rejected)..."
+    WRONG_IDENTITY="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    docker run -d --name rt-it-e --network "$NET" --ip "${SUBNET_PREFIX}.14" \
+        -e RUST_LOG=info -e "BOOTSTRAP_NODES=${IP_A}:8443@${WRONG_IDENTITY}" \
+        "$IMAGE" --data-dir /data node --addr 0.0.0.0:8443 --external-addr "${SUBNET_PREFIX}.14:8443" >/dev/null
+    wait_for_log rt-it-e "did NOT prove the pinned identity" \
+        "relay E correctly rejects A's response when the pin doesn't match (MITM/misconfig protection)"
+    docker rm -f rt-it-e >/dev/null 2>&1
+fi
 
 echo
 if (( FAILURES == 0 )); then

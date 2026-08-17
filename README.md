@@ -2,6 +2,8 @@
 
 A decentralized, anonymous overlay network written in Rust, featuring custom `.root` TLD resolution and onion routing.
 
+**[Project site: smokesession.github.io/root-network](https://smokesession.github.io/root-network/)**
+
 ## Overview
 
 Nebula TorPortal is a research implementation of a Tor-like anonymity network. It uses a 3-hop onion routing model to anonymize TCP traffic. Unlike traditional DNS, it uses a decentralized directory system and cryptographic addressing for `.root` domains.

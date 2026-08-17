@@ -60,6 +60,12 @@ cargo run -- hs --target 127.0.0.1:80 --data-dir ./data-hs
 
 Relay and hidden-service identities persist to `<data-dir>/identity.key` across restarts. Metrics are served on `--metrics-addr` (default `0.0.0.0:9090`).
 
+**Generate a vanity `.root` address:**
+```bash
+cargo run -- --data-dir ./my-site vanity myprefix
+```
+Brute-forces Ed25519 keypairs (multi-threaded, all cores by default) until the derived address starts with `myprefix`, then saves it to `<data-dir>/identity.key` — a drop-in identity for `hs`/`node`. Prefix must use base32 characters only (`a-z`, `2-7`). Search space grows 32x per extra character: a 4-character prefix takes seconds, 6 characters can take tens of minutes, 8+ characters can take days on a single machine.
+
 ## Technical Stack
 
 *   **Language:** Rust (2024 Edition, requires rustc 1.85+)

@@ -46,6 +46,16 @@ enum Commands {
         #[arg(short, long, default_value = "127.0.0.1:80")]
         target: String,
     },
+    /// Brute-forces an Ed25519 keypair whose .root address starts with the given prefix,
+    /// then saves it to <data-dir>/identity.key for use with `node`/`hs`.
+    Vanity {
+        /// Desired prefix, base32 alphabet only (a-z, 2-7), case-insensitive.
+        prefix: String,
+
+        /// Number of worker threads. Defaults to all available CPU cores.
+        #[arg(short, long)]
+        threads: Option<usize>,
+    },
 }
 
 #[tokio::main]
@@ -108,6 +118,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             let client_config = root::create_client_config()?;
 
             root::start_socks_proxy(&socks_addr, directory, circuit_manager, client_config).await?;
+        }
+        Commands::Vanity { prefix, threads } => {
+            root::run_vanity_search(&prefix, threads, &cli.data_dir)?;
         }
         Commands::Hs { target } => {
             log::info!("Starting Hidden Service for target {}...", target);

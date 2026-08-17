@@ -1706,6 +1706,107 @@ pub async fn start_gossip_task(our_relay_descriptor: RelayDescriptor, peer_store
     }
 }
 
+const BASE32_ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz234567";
+
+/// Brute-forces an Ed25519 keypair whose derived .root address (base32 of the
+/// public key, lowercase) starts with `prefix`, using all available CPU cores
+/// (or `threads` if given), then writes the winning signing key to
+/// `<data_dir>/identity.key` in the same raw-32-byte format
+/// `load_or_create_signing_key` expects, so it's a drop-in identity.
+pub fn run_vanity_search(prefix: &str, threads: Option<usize>, data_dir: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let prefix = prefix.to_lowercase();
+    if prefix.is_empty() {
+        return Err("prefix must not be empty".into());
+    }
+    if let Some(bad) = prefix.chars().find(|c| !BASE32_ALPHABET.contains(*c)) {
+        return Err(format!(
+            "invalid character '{}' in prefix — .root addresses only use base32 characters: {}",
+            bad, BASE32_ALPHABET
+        ).into());
+    }
+
+    let n_threads = threads.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    info!("Searching for .root address with prefix '{}' using {} thread(s)...", prefix, n_threads);
+
+    let found: Arc<std::sync::atomic::AtomicBool> = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let attempts: Arc<std::sync::atomic::AtomicU64> = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (tx, rx) = std::sync::mpsc::channel::<SigningKey>();
+
+    let start = std::time::Instant::now();
+    let mut handles = Vec::with_capacity(n_threads);
+    for _ in 0..n_threads {
+        let found = found.clone();
+        let attempts = attempts.clone();
+        let tx = tx.clone();
+        let prefix = prefix.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut csprng = rand::rngs::OsRng;
+            let mut local_count: u64 = 0;
+            while !found.load(std::sync::atomic::Ordering::Relaxed) {
+                let signing_key = SigningKey::generate(&mut csprng);
+                let verifying_key = VerifyingKey::from(&signing_key);
+                let addr = base32::encode(base32::Alphabet::RFC4648 { padding: false }, verifying_key.as_bytes()).to_lowercase();
+
+                local_count += 1;
+                if local_count >= 4096 {
+                    attempts.fetch_add(local_count, std::sync::atomic::Ordering::Relaxed);
+                    local_count = 0;
+                }
+
+                if addr.starts_with(&prefix) {
+                    found.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let _ = tx.send(signing_key);
+                    break;
+                }
+            }
+            attempts.fetch_add(local_count, std::sync::atomic::Ordering::Relaxed);
+        }));
+    }
+    drop(tx);
+
+    // Progress reporting on the calling thread while workers search.
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(signing_key) => {
+                for h in handles {
+                    let _ = h.join();
+                }
+                let elapsed = start.elapsed();
+                let total = attempts.load(std::sync::atomic::Ordering::Relaxed);
+                let verifying_key = VerifyingKey::from(&signing_key);
+                let addr = base32::encode(base32::Alphabet::RFC4648 { padding: false }, verifying_key.as_bytes()).to_lowercase();
+                info!(
+                    "Found matching identity after {} attempts in {:.1}s ({:.0} keys/sec): {}.root",
+                    total, elapsed.as_secs_f64(), total as f64 / elapsed.as_secs_f64().max(0.001), addr
+                );
+
+                std::fs::create_dir_all(data_dir)?;
+                let key_path = std::path::Path::new(data_dir).join("identity.key");
+                std::fs::write(&key_path, signing_key.to_bytes())?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(metadata) = std::fs::metadata(&key_path) {
+                        let mut perms = metadata.permissions();
+                        perms.set_mode(0o600);
+                        let _ = std::fs::set_permissions(&key_path, perms);
+                    }
+                }
+                info!("Saved identity to {}", key_path.display());
+                return Ok(());
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let total = attempts.load(std::sync::atomic::Ordering::Relaxed);
+                let elapsed = start.elapsed().as_secs_f64();
+                info!("...{} attempts so far ({:.0} keys/sec)", total, total as f64 / elapsed.max(0.001));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("vanity search threads exited without finding a match".into());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

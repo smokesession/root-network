@@ -474,13 +474,18 @@ impl Directory {
         let lock = self.hidden_services.read().await;
         lock.get(key).cloned()
     }
+
+    pub async fn get_all_hidden_services(&self) -> Vec<HiddenServiceDescriptor> {
+        let lock = self.hidden_services.read().await;
+        lock.values().cloned().collect()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Message { Gossip(GossipMessage), TorCell(Cell) }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum GossipMessage { Update(Vec<RelayDescriptor>) }
+pub enum GossipMessage { Update(Vec<RelayDescriptor>, Vec<HiddenServiceDescriptor>) }
 
 pub type CircuitId = u32;
 
@@ -764,10 +769,14 @@ async fn handle_incoming_connection(tls_stream: tokio_rustls::server::TlsStream<
         
         if let Ok(message) = bincode::deserialize::<Message>(&packet.payload) {
             match message {
-                Message::Gossip(GossipMessage::Update(descriptors)) => {
+                Message::Gossip(GossipMessage::Update(descriptors, hs_descriptors)) => {
                     for d in descriptors { directory.add_relay(d).await; }
+                    for hs in hs_descriptors { directory.publish_hidden_service(hs).await; }
                     // Reply with our own view of the directory so gossip propagates both ways.
-                    let reply = Message::Gossip(GossipMessage::Update(directory.get_all_relays().await));
+                    let reply = Message::Gossip(GossipMessage::Update(
+                        directory.get_all_relays().await,
+                        directory.get_all_hidden_services().await,
+                    ));
                     if let Ok(encoded) = bincode::serialize(&reply) {
                         let mut lock = stream_arc.lock().await;
                         let _ = lock.write_all(&Packet::encapsulate(encoded)).await;
@@ -1662,13 +1671,16 @@ async fn gossip_with_addr(
     }
     match time::timeout(time::Duration::from_secs(5), Packet::decapsulate(&mut stream)).await {
         Ok(Ok(reply_packet)) => {
-            if let Ok(Message::Gossip(GossipMessage::Update(descriptors))) = bincode::deserialize::<Message>(&reply_packet.payload) {
+            if let Ok(Message::Gossip(GossipMessage::Update(descriptors, hs_descriptors))) = bincode::deserialize::<Message>(&reply_packet.payload) {
                 for d in descriptors {
                     if directory.add_relay(d.clone()).await {
                         if let Ok(info) = PeerInfo::new(d) {
                             peer_store.add_peer(info).await;
                         }
                     }
+                }
+                for hs in hs_descriptors {
+                    directory.publish_hidden_service(hs).await;
                 }
             }
         }
@@ -1683,7 +1695,10 @@ pub async fn start_gossip_task(our_relay_descriptor: RelayDescriptor, peer_store
         interval.tick().await;
         directory.add_relay(our_relay_descriptor.clone()).await;
 
-        let packet = match bincode::serialize(&Message::Gossip(GossipMessage::Update(directory.get_all_relays().await))) {
+        let packet = match bincode::serialize(&Message::Gossip(GossipMessage::Update(
+            directory.get_all_relays().await,
+            directory.get_all_hidden_services().await,
+        ))) {
             Ok(encoded) => Packet::encapsulate(encoded),
             Err(e) => { log::error!("Gossip: failed to encode packet: {}", e); continue; }
         };
@@ -1700,6 +1715,43 @@ pub async fn start_gossip_task(our_relay_descriptor: RelayDescriptor, peer_store
         if let Ok(bootstrap_nodes) = get_bootstrap_nodes() {
             for addr in bootstrap_nodes {
                 if addr == our_relay_descriptor.external_address { continue; }
+                gossip_with_addr(addr, &packet, client_tls_config.clone(), &directory, &peer_store).await;
+            }
+        }
+    }
+}
+
+/// Lightweight directory sync for processes that don't run a listening relay
+/// (the `client` and `hs` subcommands). Unlike `start_gossip_task`, this never
+/// announces a `RelayDescriptor` for the calling process itself — it only pulls
+/// and pushes whatever the caller has already published locally (e.g. an HS
+/// descriptor from `start_hidden_service`), so `.root` hidden services and
+/// known relays actually reach the rest of the network instead of staying
+/// stuck in a process-local `Directory` that nothing else ever sees.
+///
+/// Ticks immediately on start (so a fresh client/HS doesn't wait 10s before
+/// its first sync) and then every 10 seconds thereafter.
+pub async fn start_directory_sync_task(peer_store: Arc<PeerStore>, directory: Arc<Directory>, client_tls_config: Arc<ClientConfig>) {
+    let mut interval = time::interval(time::Duration::from_secs(10));
+    loop {
+        interval.tick().await;
+
+        let packet = match bincode::serialize(&Message::Gossip(GossipMessage::Update(
+            directory.get_all_relays().await,
+            directory.get_all_hidden_services().await,
+        ))) {
+            Ok(encoded) => Packet::encapsulate(encoded),
+            Err(e) => { log::error!("Directory sync: failed to encode packet: {}", e); continue; }
+        };
+
+        let connected_peers = peer_store.get_all_peers().await;
+        let selected_peers: Vec<PeerInfo> = { let mut rng = thread_rng(); connected_peers.choose_multiple(&mut rng, 3).cloned().collect() };
+        for peer in selected_peers {
+            gossip_with_addr(peer.descriptor.external_address, &packet, client_tls_config.clone(), &directory, &peer_store).await;
+        }
+
+        if let Ok(bootstrap_nodes) = get_bootstrap_nodes() {
+            for addr in bootstrap_nodes {
                 gossip_with_addr(addr, &packet, client_tls_config.clone(), &directory, &peer_store).await;
             }
         }

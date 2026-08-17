@@ -114,8 +114,18 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Commands::Client { socks_addr } => {
             log::info!("Starting Nebula Client (SOCKS5) on {}...", socks_addr);
             let directory = Arc::new(root::Directory::new());
+            let peer_store = Arc::new(root::PeerStore::new());
             let circuit_manager = Arc::new(root::CircuitManager::new());
             let client_config = root::create_client_config()?;
+
+            // Without this, `directory` never learns about any relay or hidden
+            // service on the network and every circuit/rendezvous attempt fails.
+            let d_clone = directory.clone();
+            let ps_clone = peer_store.clone();
+            let c_config_clone = client_config.clone();
+            tokio::spawn(async move {
+                root::start_directory_sync_task(ps_clone, d_clone, c_config_clone).await;
+            });
 
             root::start_socks_proxy(&socks_addr, directory, circuit_manager, client_config).await?;
         }
@@ -125,8 +135,19 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Commands::Hs { target } => {
             log::info!("Starting Hidden Service for target {}...", target);
             let directory = Arc::new(root::Directory::new());
+            let peer_store = Arc::new(root::PeerStore::new());
             let client_config = root::create_client_config()?;
             let signing_key = root::load_or_create_signing_key(&cli.data_dir)?;
+
+            // Without this, the HS descriptor published locally by
+            // start_hidden_service never leaves this process, so no client
+            // anywhere else on the network can ever discover this .root address.
+            let d_clone = directory.clone();
+            let ps_clone = peer_store.clone();
+            let c_config_clone = client_config.clone();
+            tokio::spawn(async move {
+                root::start_directory_sync_task(ps_clone, d_clone, c_config_clone).await;
+            });
 
             root::start_hidden_service(&target, directory, client_config, signing_key).await?;
         }

@@ -1,0 +1,76 @@
+{
+  "policies": {
+    "DisableAppUpdate": true,
+    "DisableTelemetry": true,
+    "DisablePocket": true,
+    "DisableFirefoxAccounts": true,
+    "DisableFirefoxScreenshots": true,
+    "DisableFormHistory": true,
+    "DisableMasterPasswordCreation": false,
+    "DisableProfileImport": true,
+    "DisableSetDesktopBackground": true,
+    "DontCheckDefaultBrowser": true,
+    "NoDefaultBookmarks": true,
+    "OfferToSaveLogins": false,
+    "OfferToSaveLoginsDefault": false,
+    "PasswordManagerEnabled": false,
+    "NetworkPrediction": false,
+    "Homepage": {
+      "URL": "about:blank",
+      "Locked": false,
+      "StartPage": "homepage"
+    },
+    "Preferences": {
+      "browser.newtabpage.enabled": {
+        "Value": false,
+        "Status": "locked"
+      }
+    },
+    "PopupBlocking": {
+      "Default": true
+    },
+    "Cookies": {
+      "Behavior": "reject-tracker-and-partition-foreign"
+    },
+    "EnableTrackingProtection": {
+      "Value": true,
+      "Cryptomining": true,
+      "Fingerprinting": true
+    },
+    "DNSOverHTTPS": {
+      "Enabled": false,
+      "Locked": true
+    },
+    "Proxy": {
+      "Mode": "manual",
+      "Locked": false,
+      "SOCKSProxy": "127.0.0.1",
+      "SOCKSPort": 9050,
+      "SOCKSVersion": 5,
+      "UseProxyForDNS": true,
+      "Passthrough": "",
+      "AutoConfigURL": "",
+      "AutoLogin": false,
+      "FTPProxy": "",
+      "HTTPProxy": "",
+      "SSLProxy": "",
+      "UseHTTPProxyForAllProtocols": false
+    },
+    "SearchSuggestEnabled": false,
+    "UserMessaging": {
+      "WhatsNew": false,
+      "ExtensionRecommendations": false,
+      "FeatureRecommendations": false,
+      "UrlbarInterventions": false,
+      "SkipOnboarding": true,
+      "MoreFromMozilla": false,
+      "Locked": true
+    },
+    "DisableFeedbackCommands": true,
+    "DisablePasswordReveal": false,
+    "DisableSecurityBypass": {
+      "InvalidCertificate": false,
+      "SafeBrowsing": false
+    }
+  }
+}

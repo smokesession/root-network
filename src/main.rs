@@ -22,6 +22,17 @@ enum Commands {
         #[arg(short, long, default_value = "0.0.0.0:8443")]
         addr: String,
 
+        /// The address other nodes should use to dial back to this relay. This
+        /// is what gets published in this relay's gossiped descriptor. Defaults
+        /// to --addr, which only works if --addr is itself a concrete,
+        /// externally-reachable address (NOT the default 0.0.0.0, which peers
+        /// cannot dial back to). Required in practice for any relay that isn't
+        /// purely local/loopback testing.
+        /// MUST be a literal IP:port (e.g. "203.0.113.5:8443") - hostnames are
+        /// NOT resolved here, matching --addr's existing behavior.
+        #[arg(long)]
+        external_addr: Option<String>,
+
         #[arg(short, long, default_value = "localhost")]
         hostname: String,
 
@@ -64,11 +75,20 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Node { addr, hostname, metrics_addr, exit_policy } => {
+        Commands::Node { addr, external_addr, hostname, metrics_addr, exit_policy } => {
             log::info!("Starting Nebula Node on {}...", addr);
             let (cert_der, pk_der) = root::generate_self_signed_cert(&hostname)?;
             let server_config = root::create_server_config(cert_der.clone(), pk_der)?;
             let client_config = root::create_client_config()?;
+
+            let external_addr = external_addr.unwrap_or_else(|| addr.clone());
+            if external_addr.starts_with("0.0.0.0") || external_addr.starts_with("[::]") || external_addr.starts_with("::") {
+                log::warn!(
+                    "This relay's advertised address is '{}', which other nodes cannot dial back to. \
+                     Set --external-addr to your real public IP/hostname:port unless this is purely local testing.",
+                    external_addr
+                );
+            }
 
             let exit_policy = match exit_policy {
                 Some(path) => {
@@ -86,7 +106,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             let verifying_key = VerifyingKey::from(&signing_key);
             // tls_public_key carries this relay's TLS certificate DER so peers can pin
             // future connections to it once they've learned this (signed) descriptor.
-            let descriptor = root::RelayDescriptor::new(verifying_key, addr.parse()?, cert_der.clone(), &signing_key)?;
+            let descriptor = root::RelayDescriptor::new(verifying_key, external_addr.parse()?, cert_der.clone(), &signing_key)?;
 
             let directory = Arc::new(root::Directory::new());
             let peer_store = Arc::new(root::PeerStore::new());

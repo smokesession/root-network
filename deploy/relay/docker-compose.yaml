@@ -6,7 +6,11 @@ services:
       context: ../../
       dockerfile: Dockerfile
     # --data-dir is a global flag: it must come before the `node` subcommand.
-    command: --data-dir /data node --addr 0.0.0.0:8443 --hostname ${HOSTNAME:-relay} --metrics-addr 0.0.0.0:9090
+    # EXTERNAL_ADDR must be set to this host's real public IP/hostname:port -
+    # it's what gets gossiped to other relays as the address to dial back to.
+    # Leaving it unset means this relay advertises 0.0.0.0, which NO other
+    # node can connect to.
+    command: --data-dir /data node --addr 0.0.0.0:8443 --external-addr ${EXTERNAL_ADDR:?Set EXTERNAL_ADDR to this host's public IP:8443, e.g. EXTERNAL_ADDR=203.0.113.5:8443} --hostname ${HOSTNAME:-relay} --metrics-addr 0.0.0.0:9090
     environment:
       # Comma-separated seed peers to dial on startup, e.g. "1.2.3.4:8443,5.6.7.8:8443".
       # Leave empty for the first node in a network (nothing to bootstrap from yet).

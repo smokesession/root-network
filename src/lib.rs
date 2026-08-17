@@ -1565,14 +1565,58 @@ pub async fn start_hidden_service(
     let onion_addr = base32::encode(base32::Alphabet::RFC4648 { padding: false }, verifying_key.as_bytes()).to_lowercase();
     info!("Hidden service identity: {}.root", onion_addr);
 
-    // Select introduction points from the directory.
+    let mut intro_addrs = establish_intro_points(target_addr, &directory, &client_config, verifying_key).await;
+    if intro_addrs.is_empty() {
+        log::warn!("HS: no relays known in directory yet; will keep retrying to establish introduction points every 15s");
+    }
+
+    // Build and sign the HS descriptor, then publish it into the gossip directory.
+    let descriptor = HiddenServiceDescriptor::new(verifying_key, intro_addrs.clone(), &signing_key)?;
+    directory.publish_hidden_service(descriptor).await;
+    info!("HS: published descriptor for {}.root", onion_addr);
+
+    // Keep the process alive. While we have no introduction points yet, retry
+    // establishing them frequently (the directory sync task may still be
+    // learning about relays); once we have at least one, fall back to a slow
+    // periodic re-publish so the descriptor doesn't expire out of peers'
+    // directories.
+    loop {
+        let wait = if intro_addrs.is_empty() { std::time::Duration::from_secs(15) } else { std::time::Duration::from_secs(600) };
+        tokio::time::sleep(wait).await;
+
+        if intro_addrs.is_empty() {
+            intro_addrs = establish_intro_points(target_addr, &directory, &client_config, verifying_key).await;
+            if intro_addrs.is_empty() {
+                log::warn!("HS: still no relays available for introduction points, retrying in 15s");
+                continue;
+            }
+            info!("HS: successfully established {} introduction point(s) after retry", intro_addrs.len());
+        }
+
+        let refreshed = match HiddenServiceDescriptor::new(verifying_key, intro_addrs.clone(), &signing_key) {
+            Ok(d) => d,
+            Err(e) => { log::error!("HS: failed to re-sign descriptor: {}", e); continue; }
+        };
+        directory.publish_hidden_service(refreshed).await;
+    }
+}
+
+/// Selects up to 3 relays from the directory, establishes an introduction
+/// circuit to each (sending `EstablishIntro` and waiting for
+/// `IntroEstablished`), and spawns a listener task on each successful circuit
+/// that dispatches inbound `Introduce2` cells to `handle_introduce2`. Returns
+/// the addresses of the relays that actually confirmed. Safe to call again
+/// later (e.g. on retry) if it returns empty or partial results — each call
+/// only spawns listeners for circuits it itself just established.
+async fn establish_intro_points(
+    target_addr: &str,
+    directory: &Arc<Directory>,
+    client_config: &Arc<ClientConfig>,
+    verifying_key: VerifyingKey,
+) -> Vec<SocketAddr> {
     let mut relays = directory.get_all_relays().await;
     { let mut rng = thread_rng(); relays.shuffle(&mut rng); }
     let intro_relays: Vec<RelayDescriptor> = relays.into_iter().take(3).collect();
-
-    if intro_relays.is_empty() {
-        log::warn!("HS: no relays known in directory yet; will retry establishing introduction points periodically");
-    }
 
     let mut intro_addrs = Vec::new();
     for relay in &intro_relays {
@@ -1618,22 +1662,7 @@ pub async fn start_hidden_service(
             }
         });
     }
-
-    // Build and sign the HS descriptor, then publish it into the gossip directory.
-    let descriptor = HiddenServiceDescriptor::new(verifying_key, intro_addrs.clone(), &signing_key)?;
-    directory.publish_hidden_service(descriptor).await;
-    info!("HS: published descriptor for {}.root", onion_addr);
-
-    // Keep the process alive; periodically re-publish so the descriptor doesn't
-    // expire out of peers' directories.
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
-        let refreshed = match HiddenServiceDescriptor::new(verifying_key, intro_addrs.clone(), &signing_key) {
-            Ok(d) => d,
-            Err(e) => { log::error!("HS: failed to re-sign descriptor: {}", e); continue; }
-        };
-        directory.publish_hidden_service(refreshed).await;
-    }
+    intro_addrs
 }
 
 pub fn get_bootstrap_nodes() -> Result<Vec<SocketAddr>, Box<dyn Error + Send + Sync>> {

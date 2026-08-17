@@ -1,0 +1,21 @@
+version: '3.8'
+services:
+  # The Nebula HS Host
+  hs_host:
+    image: nebula-net:latest
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    # Points to the 'web' service defined below
+    command: hs --target web:80
+    environment:
+      - BOOTSTRAP_NODES=127.0.0.1:8443
+      - RUST_LOG=info
+    depends_on:
+      - web
+    restart: unless-stopped
+
+  # Example Web Server (User replaces this with their own app)
+  web:
+    image: nginx:alpine
+    restart: unless-stopped

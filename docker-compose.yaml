@@ -1,0 +1,31 @@
+version: '3.8'
+services:
+  relay1:
+    build: .
+    command: node --addr 0.0.0.0:8443 --hostname relay1
+    environment:
+      - BOOTSTRAP_NODES=relay2:8443
+      - RUST_LOG=info
+    ports:
+      - "8443:8443"
+
+  relay2:
+    build: .
+    command: node --addr 0.0.0.0:8443 --hostname relay2
+    environment:
+      - BOOTSTRAP_NODES=relay1:8443
+      - RUST_LOG=info
+    ports:
+      - "8444:8443"
+
+  client:
+    build: .
+    command: client --socks-addr 0.0.0.0:9050
+    environment:
+      - BOOTSTRAP_NODES=relay1:8443,relay2:8443
+      - RUST_LOG=info
+    ports:
+      - "9050:9050"
+    depends_on:
+      - relay1
+      - relay2

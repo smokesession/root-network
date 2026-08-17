@@ -1,0 +1,52 @@
+# Project: Nebula TorPortal - .root Overlay Network Development
+
+**STATUS: Working prototype (core functionality operational, not security-reviewed)**
+
+This document logs the development lifecycle of the Nebula network. An earlier
+version of this file and README.md claimed the project was "COMPLETED" through
+Phase 6 — that was inaccurate. As of the most recent pass, the project builds,
+runs, and its core features work end-to-end, but the earlier claim of full
+completion has been walked back to reflect actual code state.
+
+---
+
+## 1. Documentation & Guides
+
+**PRIMARY REFERENCE:** See **`NEBULA_MANUAL.TXT`** for the comprehensive Deployment, User, and Hosting guide.
+
+*   **`DEPLOY.md`:** Quick-start guide for Docker deployment.
+*   **`README.md`:** Technical overview, build instructions, and current status/known gaps.
+*   **`NEBULA_MANUAL.TXT`:** Detailed architecture breakdown and master manual.
+
+---
+
+## 2. What actually works (verified via cargo build/test)
+
+*   Builds cleanly: `cargo build --release`, `cargo test` (7 unit tests passing).
+*   Gossip peer discovery dials known/bootstrap peers and propagates directory state.
+*   SOCKS5 client proxy forwards real traffic through 3-hop onion circuits for
+    regular (non-`.root`) destinations.
+*   Hidden services generate a persistent identity, publish a signed descriptor
+    into the gossip directory, and accept inbound rendezvous connections,
+    forwarding to the operator's configured `--target`.
+*   Client-side `.root` browsing: SOCKS proxy resolves `.root` names, completes
+    rendezvous with the hidden service, and relays bytes.
+*   HS descriptor signatures are verified before being accepted into the directory.
+*   Relay and HS identity keys persist to `<data-dir>/identity.key`, so addresses
+    are stable across restarts.
+*   Exit-policy enforcement: relays are relay-only (no exit traffic) by default;
+    operators opt in explicitly via `--exit-policy <file>`.
+*   TLS connections are pinned to a peer's known Ed25519-signed relay descriptor
+    once one has been gossiped.
+
+## 3. Known gaps (see README.md "Known gaps" for the current list)
+
+*   Bootstrap/first-contact TLS trust is TOFU, not pinned.
+*   HS side doesn't do a per-connection Begin/Connected handshake — target port
+    is whatever the HS operator configured, not the client-requested one.
+*   IPv6 unsupported in circuit extension and exit-policy evaluation.
+*   No multi-node integration test harness yet (only local unit tests).
+*   No third-party security review.
+
+**The project is functional but should be treated as an active research
+prototype, not a hardened production anonymity network.**

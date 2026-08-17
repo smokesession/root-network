@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  client:
+    image: nebula-net:latest
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    command: client --socks-addr 0.0.0.0:9050
+    environment:
+      # In production, this would point to public seed nodes
+      - BOOTSTRAP_NODES=127.0.0.1:8443
+      - RUST_LOG=info
+    ports:
+      - "127.0.0.1:9050:9050" # Bind to localhost for security
+    restart: unless-stopped

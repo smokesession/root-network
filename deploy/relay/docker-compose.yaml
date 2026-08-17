@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  relay:
+    image: nebula-net:latest
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    command: node --addr 0.0.0.0:8443 --hostname ${HOSTNAME:-my-relay}
+    environment:
+      # Point to a known stable node (e.g., one of our seed nodes)
+      - BOOTSTRAP_NODES=127.0.0.1:8444
+      - RUST_LOG=info
+    ports:
+      - "8443:8443"
+    restart: unless-stopped

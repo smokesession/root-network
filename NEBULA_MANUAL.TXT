@@ -1,0 +1,207 @@
+================================================================================
+                        NEBULA TORPORTAL - THE MANUAL
+================================================================================
+
+Version: 1.0.0 (Prototype)
+Date: January 29, 2026
+Project: Decentralized Anonymous Overlay Network (.root)
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+1.  EXECUTIVE SUMMARY
+2.  TECHNICAL ARCHITECTURE
+    2.1. Onion Routing & Encryption
+    2.2. The Decentralized Directory (Gossip)
+    2.3. The .root Naming System
+3.  DEPLOYMENT GUIDE: RELAY NODES (For VPS Hosts)
+4.  USER GUIDE: CLIENT ACCESS (For Browsing)
+5.  PUBLISHER GUIDE: HOSTING HIDDEN SERVICES
+6.  CLI REFERENCE
+7.  SECURITY & LIMITATIONS
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+Nebula TorPortal is a next-generation overlay network designed to provide anonymity
+and censorship resistance. Unlike traditional VPNs or proxies, Nebula routes
+traffic through a decentralized network of volunteer relays, using layered
+encryption ("Onion Routing") to ensure that no single point in the network knows
+both the origin and destination of the data.
+
+Key Features:
+- **Zero Central Authority:** No central directory servers. Network state is 
+  maintained via a Peer-to-Peer Gossip protocol.
+- **.root TLD:** A sovereign top-level domain system where domain names are 
+  derived directly from cryptographic keys. No registrars, no fees, no censorship.
+- **Hidden Services:** Users can host websites anonymously inside the network 
+  without revealing their IP address.
+
+================================================================================
+2. TECHNICAL ARCHITECTURE
+================================================================================
+
+2.1. ONION ROUTING & ENCRYPTION
+--------------------------------------------------------------------------------
+Traffic in Nebula is routed through a "Circuit" consisting of three hops:
+  [Client] -> [Entry Node] -> [Middle Node] -> [Exit Node] -> [Destination]
+
+- **Link Layer:** All connections between nodes are secured with TLS 1.3.
+- **Circuit Layer:**
+  - **Key Exchange:** X25519 (Elliptic Curve Diffie-Hellman) is used to establish
+    ephemeral shared secrets with each hop in the circuit.
+  - **Encryption:** AES-256-CTR (Counter Mode) is used for the layered "onion"
+    encryption. The client encrypts the packet three times. Each node peels off
+    one layer before forwarding.
+
+2.2. THE DECENTRALIZED DIRECTORY (GOSSIP)
+--------------------------------------------------------------------------------
+Nebula does not use "Directory Authorities" like Tor. Instead, it uses a P2P
+flood-fill protocol (Gossip):
+1.  When a Relay starts, it generates a "Relay Descriptor" containing its 
+    Identity Key (Ed25519) and IP address.
+2.  It signs this descriptor and sends it to its known peers.
+3.  Peers validate the signature and timestamp. If valid and new, they add it 
+    to their local directory and propagate it to their peers.
+Result: Every node eventually has a complete view of the network.
+
+2.3. THE .root NAMING SYSTEM
+--------------------------------------------------------------------------------
+Nebula introduces the `.root` Top-Level Domain.
+- **Format:** `[Base32 Encoded Ed25519 Public Key].root`
+- **Resolution:**
+  1.  The client SOCKS proxy detects a request for a `.root` domain.
+  2.  It decodes the Base32 string to extract the Public Key.
+  3.  It queries the local Directory for a "Hidden Service Descriptor" signed 
+      by that key.
+  4.  If found, the client establishes a Rendezvous Point and connects to the 
+      service via its Introduction Points.
+
+================================================================================
+3. DEPLOYMENT GUIDE: RELAY NODES (For VPS Hosts)
+================================================================================
+Running a relay helps the network grow. It requires a server (VPS) with a public
+IPv4 address and Docker installed.
+
+STEP 1: PREPARATION
+-------------------
+Ensure Docker and Docker Compose are installed.
+Open TCP port 8443 in your firewall.
+
+STEP 2: DEPLOYMENT
+-------------------
+1.  Download the Nebula source code.
+2.  Navigate to the relay deployment directory:
+    $ cd deploy/relay
+
+3.  (Optional) Edit `docker-compose.yaml` to set a custom hostname or 
+    bootstrap peers.
+    
+    environment:
+      - BOOTSTRAP_NODES=seed1.nebula.net:8443,seed2.nebula.net:8443
+
+4.  Start the node:
+    $ docker-compose up -d
+
+5.  Verify it's running:
+    $ docker logs -f relay-relay-1
+
+    You should see logs like:
+    [INFO] Relay listening on 0.0.0.0:8443
+    [INFO] Starting gossip round...
+
+Your node is now part of the network!
+
+================================================================================
+4. USER GUIDE: CLIENT ACCESS (For Browsing)
+================================================================================
+To browse `.root` sites or surf the web anonymously through Nebula:
+
+STEP 1: START THE CLIENT
+------------------------
+1.  Navigate to the client directory:
+    $ cd deploy/client
+
+2.  Start the client:
+    $ docker-compose up -d
+
+This starts a SOCKS5 proxy on your local machine at `127.0.0.1:9050`.
+
+STEP 2: CONFIGURE BROWSER (Firefox Recommended)
+-----------------------------------------------
+1.  Open Firefox Settings -> General -> Network Settings.
+2.  Select **"Manual proxy configuration"**.
+3.  **SOCKS Host:** `127.0.0.1`
+4.  **Port:** `9050`
+5.  **SOCKS v5:** Selected.
+6.  **CRITICAL:** Check the box **"Proxy DNS when using SOCKS v5"**. 
+    (Without this, `.root` domains will leak to your local DNS provider and fail).
+
+STEP 3: BROWSE
+-----------------------------------------------
+You can now access the internet via Nebula. 
+Try accessing a `.root` domain if you know one (see Hosting below).
+
+================================================================================
+5. PUBLISHER GUIDE: HOSTING HIDDEN SERVICES
+================================================================================
+You can host a website that is only accessible via Nebula.
+
+STEP 1: PREPARE YOUR CONTENT
+----------------------------
+The default configuration uses Nginx to serve static files. 
+Navigate to `deploy/hs`.
+
+STEP 2: LAUNCH THE SERVICE
+--------------------------
+$ docker-compose up -d
+
+This starts two containers:
+1.  `web`: A standard Nginx web server (hosting your content).
+2.  `hs_host`: The Nebula node that tunnels traffic to `web:80`.
+
+STEP 3: GET YOUR ADDRESS
+------------------------
+View the logs to find your generated address:
+$ docker-compose logs hs_host | grep "identity"
+
+Output:
+[INFO] Hidden service identity: (generating...)
+[INFO] Published hidden service descriptor for VerifyingKey(...)
+
+*Note: In this prototype version, the Base32 address is logged or derived from the key. 
+Production versions will save `hostname` to a file.*
+
+================================================================================
+6. CLI REFERENCE
+================================================================================
+The binary `root` has three main modes:
+
+1.  `root node --addr <IP:PORT> --hostname <NAME>`
+    -   Starts a Relay Node.
+    -   Participates in Gossip and routing.
+
+2.  `root client --socks-addr <IP:PORT>`
+    -   Starts a Client.
+    -   Exposes a SOCKS5 interface.
+    -   Does NOT route traffic for others.
+
+3.  `root hs --target <IP:PORT>`
+    -   Starts a Hidden Service Host.
+    -   Generates an identity.
+    -   Proxies incoming Nebula traffic to the target TCP address.
+
+================================================================================
+7. SECURITY & LIMITATIONS (Prototype Warning)
+================================================================================
+This is a research prototype ("Phase 6" completion). 
+
+1.  **Ephemeral Keys:** Relay identities and HS keys are currently generated 
+    fresh on every restart. Persistence (saving keys to disk) is not enabled 
+    in the default Docker config.
+2.  **Traffic Analysis:** While traffic padding logic exists, it is basic. 
+    Global adversaries might still perform correlation attacks.
+3.  **Exit Nodes:** By default, relays may act as exits. In a production 
+    network, strict exit policies are required to prevent abuse.
+
+USE AT YOUR OWN RISK.

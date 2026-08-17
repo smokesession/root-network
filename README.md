@@ -2,7 +2,7 @@
 
 A decentralized, anonymous overlay network written in Rust, featuring custom `.root` TLD resolution and onion routing.
 
-**[Project site: smokesession.github.io/root-network](https://smokesession.github.io/root-network/)**
+**[root.sonicvault.fun](https://root.sonicvault.fun/)** (also mirrored on [GitHub Pages](https://smokesession.github.io/root-network/))
 
 ## Overview
 

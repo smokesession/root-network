@@ -10,17 +10,23 @@ No third-party security review has been performed. There is no threat model docu
 
 This is the single most important thing to understand before running or recommending this project for anything sensitive: **onion routing's anonymity guarantee depends on the relays in your circuit being operated independently, by parties who don't collude and can't correlate your traffic across hops.** If you (or one operator) run all the relays in a testnet — including the common case of `docker-compose up` spinning up 2 relays and a client on one machine — there is no anonymity being provided. The traffic is encrypted hop-to-hop, and the protocol mechanics work, but the entity that can see the whole circuit trivially deanonymizes every "user." A meaningful anonymity set requires many relays under many independent operators, sustained over time, with real traffic diversity. Nothing in this codebase creates that on its own — it's a network substrate, not a community.
 
-## TLS bootstrap gap (trust-on-first-use)
+## TLS bootstrap gap (trust-on-first-use) — partially mitigated for pinned bootstrap peers
 
-Described in detail in [architecture.md](architecture.md#link-layer-tls-13--identity-pinning). Practical implication: the **very first** TLS connection ever made to a given peer address — before any `RelayDescriptor` for it has propagated via gossip — is accepted with no certificate validation at all (`AcceptAnyServerCert`). A network position capable of intercepting that specific first connection (and only that one) can MITM it undetected. Every subsequent connection to that same peer, once its signed descriptor is known, is pinned and this window closes. This is a real, currently-unmitigated gap; there's no out-of-band descriptor pre-seeding mechanism to close it. See `src/lib.rs` around `connect_to_peer` for the exact fallback logic and the accompanying `log::warn!` that fires every time this path is taken.
+Described in detail in [architecture.md](architecture.md#link-layer-tls-13--identity-pinning). Practical implication: the **very first** TLS connection ever made to a given peer address — before any `RelayDescriptor` for it has propagated via gossip — is accepted with no certificate validation at all (`AcceptAnyServerCert`). A network position capable of intercepting that specific first connection (and only that one) can MITM it undetected. Every subsequent connection to that same peer, once its signed descriptor is known, is pinned and this window closes.
+
+**As of the bootstrap-identity-pinning feature**, this gap is closed for any bootstrap peer you have an out-of-band identity for: `BOOTSTRAP_NODES` entries can be written as `ip:port@identity` (the identity is the same base32 `.root`-style string a relay logs about itself at startup). When pinned, the *response* from that bootstrap dial is only trusted if it contains a validly-signed `RelayDescriptor` proving that exact identity at that exact address — an attacker without the real operator's private key cannot forge a match, and a mismatch causes the entire response to be discarded with an `ERROR`-level log line. This is the same model Tor uses for directory authority fingerprints. See `get_bootstrap_nodes` and `gossip_with_addr` in `src/lib.rs`.
+
+**What's still unmitigated:** peers you learn about purely through gossip (not configured as a pinned bootstrap entry) still get TOFU on first contact — there's no way to pin an identity you don't already know out-of-band. And an *unpinned* `BOOTSTRAP_NODES` entry (no `@identity` suffix) still gets plain TOFU, same as before. This feature only helps when you actually have a trustworthy identity string to pin, not by default.
 
 ## Hidden-service target port is not client-controlled
 
 As detailed in [protocol.md](protocol.md#d-a-client-browses-a-root-address-full-rendezvous), the HS side of the rendezvous (`handle_introduce2` in `src/lib.rs`) never implements a `Begin`/`Connected` handshake — it connects to whatever `--target` the HS operator configured and starts forwarding data immediately. Any port the visiting client's SOCKS `CONNECT` request specified is silently ignored. If you're building on top of this expecting Tor-style per-port hidden service routing, it isn't there; you get exactly one fixed target per HS process.
 
-## Hidden-service descriptor propagation is not fully wired across the gossip network
+## Hidden-service descriptor propagation — fixed, verified live
 
-The periodic relay gossip loop (`start_gossip_task`) only exchanges `GossipMessage::Update(Vec<RelayDescriptor>)` — relay descriptors, not hidden-service descriptors. A `HiddenServiceDescriptor` is inserted into whichever single relay's (or process's) `Directory` instance the publishing HS happens to be using; there is no code path that floods HS descriptors out to other relays' directories the way relay descriptors are flooded. In a genuinely multi-process deployment, a client's local `Directory` will generally not contain a HS's descriptor unless something else populates it. This is worth treating as a functional gap, not just a cosmetic one, if you're trying to actually reach a `.root` address hosted on a different machine than the client is bootstrapped against.
+**Previously a real gap, now fixed:** the gossip payload (`GossipMessage::Update`) now carries `Vec<HiddenServiceDescriptor>` alongside `Vec<RelayDescriptor>`, and both `client` and `hs` processes run `start_directory_sync_task` (previously they ran no sync task at all and their `Directory` was permanently empty except for whatever they published locally). Verified with a real 3-container Docker test: a relay two hops away from the HS operator, never having contacted the HS directly, received and published its descriptor via gossip through an intermediate relay within ~10 seconds. See `docs/protocol.md` for the full walkthrough and `tests/integration/gossip_and_rendezvous_test.sh` for the automated regression test.
+
+A separate, related bug was also found and fixed in the same pass: HS intro-point selection previously ran once at startup and never actually retried if the directory happened to be empty at that exact moment (despite a log message claiming it would) — a freshly-started HS could get stuck with zero intro points forever. It now retries every 15s until it succeeds.
 
 ## No traffic-analysis or timing-correlation defenses
 
@@ -34,9 +40,9 @@ There is no cell padding, no traffic shaping, no mixing/batching, and no defense
 
 If your network environment is IPv6-only or IPv6-primary, this project currently won't route your traffic at all in some paths, and specifically won't let you exit to IPv6-only destinations.
 
-## Bootstrap-only trust for `BOOTSTRAP_NODES`
+## Bootstrap-node trust for `BOOTSTRAP_NODES` — pinning available, opt-in
 
-`BOOTSTRAP_NODES` addresses are dialed like any other peer (through `connect_to_peer`, hence subject to the same TOFU-then-pinned behavior) — there's no separate stronger verification (e.g. a pinned fingerprint list) for the seed nodes a fresh install trusts to bootstrap into the network. If you're distributing a seed-node list out-of-band, there's currently no mechanism to also distribute their expected public keys/certs for stronger initial trust.
+See the "TLS bootstrap gap" section above. `BOOTSTRAP_NODES` entries can now carry a pinned identity (`ip:port@identity`) for stronger initial trust when you're distributing a seed-node list out-of-band. This is opt-in per entry — an address without `@identity` still gets plain TOFU.
 
 ## Exit-node abuse / ToS considerations for relay operators
 
@@ -53,9 +59,9 @@ Opting in to exit traffic (`--exit-policy <file>`) means your relay will origina
 |---|---|
 | Third-party security review | None |
 | Anonymity on a single-operator/testnet deployment | None — by design of the threat model, not a bug |
-| TLS bootstrap-gap MITM window | Present, unmitigated |
+| TLS bootstrap-gap MITM window | Closed for pinned `BOOTSTRAP_NODES` entries; open otherwise (opt-in, not default) |
 | HS target port honored per-client | No — fixed at HS operator's `--target` |
-| HS descriptor gossip across relays | Not fully wired — relay-only gossip payload |
+| HS descriptor gossip across relays | Fixed — verified live across 3 nodes |
 | Traffic-timing correlation defense | None |
 | IPv6 | Unsupported |
 | Exit-node abuse risk | Real, opt-in, mitigable with a strict policy |

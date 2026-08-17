@@ -11,7 +11,7 @@ It is **not** a security-audited, production-grade anonymity network. Be clear-e
 - **No third-party security review.** This is a solo/small-team research prototype. Treat every claim of "encrypted" or "anonymous" as "implements the mechanism," not "has been proven safe."
 - **A single-operator network anonymizes nobody.** Anonymity in an onion-routing network comes from the *diversity and independence* of relay operators — if one person runs all three hops of your circuit (or even just knows which addresses belong to which operator), there's nothing to hide from them. A testnet you spin up yourself with `docker-compose up` and a handful of relays you control is a functional demo, not an anonymity set.
 - **No traffic-analysis or timing-correlation defenses.** There's no padding scheme, no mixing, no defense against a global or well-positioned adversary correlating traffic timing/volume at the entry and exit.
-- **Known protocol gaps** (detailed in [security-model.md](security-model.md)) including a TOFU bootstrap gap in TLS pinning and hidden services not honoring client-requested target ports.
+- **Known protocol gaps** (detailed in [security-model.md](security-model.md)) including a TOFU bootstrap gap in TLS pinning (now closeable per-peer via pinned `BOOTSTRAP_NODES` entries — see below) and hidden services not honoring client-requested target ports.
 
 If you want to actually understand or modify the code, treat this document (and its siblings) as an orientation aid, not a replacement for reading `src/lib.rs` and `src/main.rs` — both are compact enough to read in full.
 
@@ -84,3 +84,5 @@ Every relay-to-relay and client-to-relay TCP connection is wrapped in TLS via `r
 - **`connect_to_peer(...)`** is the actual dispatcher: given a target address and (optionally) a `Directory`, it looks for a matching `RelayDescriptor`; if found, it pins; if not, it falls back to TOFU accept-any and logs a warning about the bootstrap gap.
 
 In practice this means: the *first* connection ever made to a brand-new peer is unauthenticated at the TLS layer (a MITM on that exact connection would go undetected), but every *subsequent* connection to that same peer, once its signed descriptor has propagated via gossip, is cryptographically pinned. See [security-model.md](security-model.md) for the implications.
+
+**Closing the gap for bootstrap peers specifically:** `BOOTSTRAP_NODES` entries can carry a pinned identity — `ip:port@identity`, where `identity` is the same base32 `.root`-style string a relay logs about itself at startup. This doesn't change the TLS handshake itself (still TOFU at that layer); instead, `gossip_with_addr` validates the *content* of the reply against the pinned identity and discards the whole response on a mismatch, closing the practical gap for any peer you have an out-of-band identity for. See [operator-guide.md](operator-guide.md#pinning-a-bootstrap-nodes-identity-closing-the-tofu-gap).

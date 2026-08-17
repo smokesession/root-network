@@ -1,39 +1,45 @@
 # AI_REFERENCE.md — dense technical index for editing this codebase
 
-Purpose: orient fast, not replace reading source. `src/lib.rs` is ~1900 lines, `src/main.rs` ~140. Read the actual referenced lines before editing anything they cover — line numbers below are accurate as of this pass but will drift; use them as a starting search point, re-grep if a function isn't where this doc says.
+Purpose: orient fast, not replace reading source. `src/lib.rs` is ~2070 lines, `src/main.rs` ~190. Read the actual referenced lines before editing anything they cover — line numbers below were re-verified by grepping every symbol directly (not carried over from a stale prior pass) as of the bootstrap-identity-pinning change, but will drift with future edits; re-grep if a function isn't where this doc says.
 
 ## File map
 
 | File | Contents |
 |---|---|
-| `src/main.rs` (140 lines) | CLI only. `Cli`/`Commands` clap structs, `main()` dispatches to `root::*` (lib) functions per subcommand (`node`/`client`/`hs`/`vanity`). No protocol logic lives here. |
-| `src/lib.rs` (~1900 lines) | Everything else: metrics, exit policy, TLS/pinning, wire types, directory, circuits, gossip, SOCKS proxy, hidden service, vanity search, unit tests. |
+| `src/main.rs` (~190 lines) | CLI only. `Cli`/`Commands` clap structs, `main()` dispatches to `root::*` (lib) functions per subcommand (`node`/`client`/`hs`/`vanity`). Also installs a global `std::panic::set_hook` so panics inside `tokio::spawn`'d background tasks (gossip, sync, metrics) actually get logged instead of vanishing silently. No protocol logic lives here. |
+| `src/lib.rs` (~2070 lines) | Everything else: metrics, exit policy, TLS/pinning, wire types, directory, circuits, gossip, SOCKS proxy, hidden service, vanity search, unit tests. |
 
-### `src/lib.rs` section map (line ranges approximate)
+### `src/lib.rs` section map
 
 | Lines | Section |
 |---|---|
-| 1-41 | imports, `Metrics` struct |
-| 57-73 | `start_metrics_server` |
-| 75-92 | `BandwidthManager` (governor-based token bucket) |
-| 94-201 | Exit policy: `PolicyAction`, `ExitRule`, `ExitPolicy` (`reject_all`, `parse`, `load_from_file`, `is_allowed`), `ipv4_in_cidr` |
-| 203-300 | TLS pinning: `AcceptAnyServerCert`, `PinnedServerCert`, `resolve_root_domain` |
-| 301-333 | SOCKS5 constants, `Packet` (`encapsulate`/`decapsulate`, 4-byte BE length prefix, 16MB cap) |
-| 335-478 | Wire/directory types: `RelayDescriptor`, `HiddenServiceDescriptor`, `PeerInfo`, `PeerStore`, `Directory` |
-| 479-559 | `Message`, `GossipMessage`, `CellCommand`, `Cell`, `RelayCommand`, `RelayCell`, `Stream`, `Circuit`, `CircuitManager` |
-| 580-624 | `handle_extend`, `handle_create_cell` (circuit-hop crypto: X25519 handshake per hop) |
-| 626-660 | `load_or_create_signing_key` (identity persistence) |
-| 662-702 | `init_logging`, `generate_self_signed_cert`, `create_server_config`, `create_client_config`, `create_pinned_client_config` |
-| 704-751 | `listen_for_connections`, `connect_to_relay`, `connect_to_peer` (pin-or-TOFU dispatcher) |
-| 753-1006 | `handle_incoming_connection` — the big dispatch loop: gossip messages + every `CellCommand`/`RelayCommand` branch (Create, Relay→{Extend, Begin, Data, SendMe, End, EstablishIntro, Introduce1, EstablishRendezvous, Rendezvous1, rendezvous-linked bridging}) |
-| 1008-1039 | `send_relay_cell`, `recv_relay_cell` (client-side helpers: encrypt+send / recv+decrypt one `RelayCell`) |
-| 1041-1380 | `start_socks_proxy` — SOCKS5 handshake, clearnet path, full `.root` rendezvous client path |
-| 1382-1469 | `establish_circuit` (client-side multi-hop circuit builder) |
-| 1471-1540 | `handle_introduce2` (HS-side: parse Introduce2, rendezvous, bridge to local target) |
-| 1542-1628 | `start_hidden_service` (HS main loop: intro points, descriptor publish/refresh) |
-| 1630-1707 | `get_bootstrap_nodes`, `gossip_with_addr`, `start_gossip_task` |
-| 1709-1808 | `run_vanity_search` (multi-threaded brute force) |
-| 1810-1897 | `#[cfg(test)] mod tests` — 7 unit tests |
+| 1-56 | imports, `Metrics` struct |
+| 57-75 | `start_metrics_server` |
+| 76-110 | `BandwidthManager` (governor-based token bucket) |
+| 111-226 | Exit policy: `PolicyAction`, `ExitRule`, `ExitPolicy` (`reject_all`, `parse`, `load_from_file`, `is_allowed`), `ipv4_in_cidr` |
+| 227-308 | TLS pinning: `AcceptAnyServerCert`, `PinnedServerCert`, `resolve_root_domain` |
+| 309-335 | SOCKS5 constants, `Packet` (`encapsulate`/`decapsulate`, 4-byte BE length prefix, 16MB cap) |
+| 336-488 | Wire/directory types: `RelayDescriptor`, `HiddenServiceDescriptor`, `PeerInfo`, `PeerStore`, `Directory` (`add_relay` now logs `info!` on genuinely new relays, not on refreshes) |
+| 489-588 | `Message`, `GossipMessage` (`Update(Vec<RelayDescriptor>, Vec<HiddenServiceDescriptor>)` — carries both, not relay-only), `CellCommand`, `Cell`, `RelayCommand`, `RelayCell`, `Stream`, `Circuit`, `CircuitManager` |
+| 589-637 | `handle_extend` (circuit-hop crypto: X25519 handshake per hop) |
+| 638-670 | `load_or_create_signing_key` (identity persistence) |
+| 671-712 | `init_logging`, `generate_self_signed_cert`, `create_server_config`, `create_client_config`, `create_pinned_client_config` |
+| 713-777 | `listen_for_connections`, `connect_to_relay`, `connect_to_peer` (10s-timeout wrapper) + `connect_to_peer_inner` (pin-or-TOFU dispatcher) |
+| 778-1038 | `handle_incoming_connection` — the big dispatch loop: gossip messages + every `CellCommand`/`RelayCommand` branch (Create, Relay→{Extend, Begin, Data, SendMe, End, EstablishIntro, Introduce1, EstablishRendezvous, Rendezvous1, rendezvous-linked bridging}) |
+| 1039-1069 | `send_relay_cell`, `recv_relay_cell` (client-side helpers: encrypt+send / recv+decrypt one `RelayCell`) |
+| 1070-1411 | `start_socks_proxy` — SOCKS5 handshake, clearnet path, full `.root` rendezvous client path |
+| 1412-1504 | `establish_circuit` (client-side multi-hop circuit builder) |
+| 1505-1575 | `handle_introduce2` (HS-side: parse Introduce2, rendezvous, bridge to local target) |
+| 1576-1630 | `start_hidden_service` (HS main loop; delegates intro-point selection to `establish_intro_points` and retries every 15s while it has zero, falling back to a 600s refresh cadence once it has at least one) |
+| 1631-1695 | `establish_intro_points` (select relays, establish intro circuits, spawn `Introduce2` listeners — extracted so both initial setup and retry share it) |
+| 1696-1705 | `BootstrapNode` struct (`addr` + optional `expected_identity: VerifyingKey`) |
+| 1706-1757 | `get_bootstrap_nodes` — parses `BOOTSTRAP_NODES` as comma-separated `ip:port` or `ip:port@<52-char-base32-identity>` entries |
+| 1758-1813 | `gossip_with_addr` — dials, sends, awaits reply; if the target `BootstrapNode` had a pinned identity, the entire reply is discarded unless it contains a validly-signed `RelayDescriptor` proving that exact identity at that exact address (`d.id == expected && d.external_address == addr && d.verify().is_ok()`) |
+| 1814-1859 | `start_gossip_task` (relay/`Node` processes: announces `our_relay_descriptor`, gossips to known peers + bootstrap nodes every 10s) |
+| 1860-1886 | `start_directory_sync_task` (non-relay `client`/`hs` processes: same pull/push loop, no self-descriptor to announce — without this, client/HS directories stayed permanently empty) |
+| 1887-1893 | `BASE32_ALPHABET` const |
+| 1894-1987 | `run_vanity_search` (multi-threaded brute force) |
+| 1988-2074 | `#[cfg(test)] mod tests` — 7 unit tests |
 
 ### `src/main.rs` map
 
@@ -158,11 +164,11 @@ start_socks_proxy: target ends with ".root"
 
 | Primitive | Purpose | Where |
 |---|---|---|
-| Ed25519 (`ed25519_dalek`) | Relay/HS identity, descriptor signing | `RelayDescriptor::sign/verify`, `HiddenServiceDescriptor::sign/verify` (lib.rs ~353-367, ~385-399); key gen in `load_or_create_signing_key` (lib.rs ~629), `run_vanity_search` (lib.rs ~1746) |
-| X25519 (`ring::agreement`) | Per-hop ephemeral key agreement for circuit crypto | `handle_create_cell` (lib.rs ~600-607, relay side), `establish_circuit` (lib.rs ~1394-1408 hop1, ~1420-1422 subsequent hops client-side keygen) |
-| SHA-256 (`ring::digest`) | Hashes the X25519 shared secret down to a 32-byte AES key | inline closures in both `handle_create_cell` and `establish_circuit`'s agreement calls |
-| AES-256-CTR (`aes`/`ctr` crates, `Aes256Ctr` type alias at lib.rs line 28) | Per-hop cell encryption, forward and backward independently keyed from the same shared secret, **zero IV** (`[0u8;16]`) | keyed in `handle_create_cell` (relay) and `establish_circuit` (client); applied via `cipher.apply_keystream(&mut payload)` throughout `handle_incoming_connection`'s Relay branch, `send_relay_cell`, `recv_relay_cell` |
-| TLS 1.3 (`rustls` via `tokio_rustls`) | Link-layer transport security, one hop at a time | `create_server_config`/`create_client_config`/`create_pinned_client_config` (lib.rs ~674-702), used by `listen_for_connections`/`connect_to_relay`/`connect_to_peer` |
+| Ed25519 (`ed25519_dalek`) | Relay/HS identity, descriptor signing | `RelayDescriptor::sign/verify`, `HiddenServiceDescriptor::sign/verify` (lib.rs ~350-364, ~382-396); key gen in `load_or_create_signing_key` (lib.rs 638), `run_vanity_search` (lib.rs 1894) |
+| X25519 (`ring::agreement`) | Per-hop ephemeral key agreement for circuit crypto | circuit-hop crypto inside `handle_extend` (lib.rs 589-637, relay side), `establish_circuit` (lib.rs 1412-1504, client-side per-hop keygen) |
+| SHA-256 (`ring::digest`) | Hashes the X25519 shared secret down to a 32-byte AES key | inline closures in both `handle_extend` and `establish_circuit`'s agreement calls |
+| AES-256-CTR (`aes`/`ctr` crates, `Aes256Ctr` type alias near the top of lib.rs) | Per-hop cell encryption, forward and backward independently keyed from the same shared secret, **zero IV** (`[0u8;16]`) | keyed in `handle_extend` (relay) and `establish_circuit` (client); applied via `cipher.apply_keystream(&mut payload)` throughout `handle_incoming_connection`'s Relay branch, `send_relay_cell`, `recv_relay_cell` |
+| TLS 1.3 (`rustls` via `tokio_rustls`) | Link-layer transport security, one hop at a time | `create_server_config`/`create_client_config`/`create_pinned_client_config` (lib.rs 671-712), used by `listen_for_connections`/`connect_to_relay`/`connect_to_peer` |
 
 **Zero-IV note:** both forward and backward AES-256-CTR ciphers on a circuit hop are initialized with a constant zero IV (`&[0u8;16].into()`), relying entirely on the freshness of the per-handshake shared secret (from a fresh X25519 ephemeral keypair each time) for keystream uniqueness — not on IV variation. This is consistent (each `Circuit` gets its own fresh secret from its own handshake) but means **any code path that reuses a `Circuit`'s cipher instance across more than the intended single continuous keystream, or that resets/reconstructs a cipher with the same secret mid-circuit, would produce keystream reuse** — a real cryptographic bug class to watch for if refactoring circuit lifecycle code.
 
@@ -171,27 +177,29 @@ start_socks_proxy: target ends with ".root"
 - **`handle_introduce2` byte offsets** (lib.rs, function `handle_introduce2`): payload layout is `[service_key(32)][rp_ip(4)][rp_port(2)][cookie(20)]` = 58 bytes minimum. Code checks `data.len() < 58` and bails; then reads `data[32..36]` (IP), `data[36..38]` (port, `u16::from_be_bytes`), `data[38..58]` (cookie, `try_into::<[u8;20]>`). This exact layout must match what the client's `Introduce1` sends (`start_socks_proxy`, `intro1_data` construction: `key.as_bytes() + rp_ipv4.octets() + rp_addr.port().to_be_bytes() + cookie`) and what the relay's `Introduce1` handler forwards **verbatim** as `Introduce2` (no re-framing) — all three sites must stay byte-for-byte in sync. This was a real bug surface historically; if you touch any of the three sites, update all three and re-check the offsets by hand.
 - **Reject-all-by-default exit policy**: `ExitPolicy::reject_all()` (empty `rules: Vec::new()`) plus `is_allowed`'s implicit-final-reject-on-no-match together mean a relay started without `--exit-policy` rejects 100% of `Begin` requests. Do not change the default without very deliberately updating `README.md`, `docs/operator-guide.md`, and `docs/security-model.md` — this default is a safety property operators are told to rely on.
 - **Base32 `.root` address format has no version/checksum byte** — `resolve_root_domain` and the address-derivation code in `run_vanity_search`/`start_hidden_service` both just base32-encode/decode the raw 32-byte Ed25519 key. A corrupted or mistyped address decodes to a *different valid-looking* key rather than failing checksum validation. Do not assume typo-resistance if building UI/UX around address entry.
-- **TLS pinning fallback-to-TOFU** is checked in exactly one place: `connect_to_peer` (lib.rs ~738-751). It looks up `directory.get_all_relays()` for a `RelayDescriptor` matching the target `SocketAddr` with a non-empty `tls_public_key`; if found, pins via `create_pinned_client_config`; otherwise falls back to the passed-in `fallback_client_config` (normally accept-any) and logs a `log::warn!`. Every call site that dials a peer (`gossip_with_addr`, `handle_extend`, `establish_circuit`, `handle_introduce2`) should route through `connect_to_peer` (not `connect_to_relay` directly) to get pinning — `connect_to_relay` itself has no pinning logic and just uses whatever `ClientConfig` it's handed.
+- **Two independent, complementary trust layers now exist — don't conflate them.** (1) **TLS-layer pin-or-TOFU**, in `connect_to_peer`/`connect_to_peer_inner` (lib.rs 756-777): looks up `directory.get_all_relays()` for a `RelayDescriptor` matching the target `SocketAddr` with a non-empty `tls_public_key`; if found, pins via `create_pinned_client_config`; otherwise falls back to `fallback_client_config` (normally accept-any) and logs a `log::warn!`. `connect_to_peer` itself just wraps `connect_to_peer_inner` in a 10s timeout — the actual pin-or-TOFU decision lives in the inner function. Every call site that dials a peer (`gossip_with_addr`, `handle_extend`, `establish_circuit`, `handle_introduce2`) should route through `connect_to_peer` (not `connect_to_relay` directly) — `connect_to_relay` has no pinning logic, just uses whatever `ClientConfig` it's handed. (2) **Bootstrap-identity pinning**, in `gossip_with_addr` (lib.rs 1758-1813): a separate, application-layer check that only applies to `BootstrapNode` entries carrying an `expected_identity`. It doesn't touch the TLS handshake at all — it validates the *content* of the gossip reply (a signed `RelayDescriptor` must match the expected identity and address) and discards the entire response if it doesn't match. This is what actually closes the first-contact trust gap for pre-arranged peers, since layer (1) has nothing to pin to on a truly first connection.
 - **`RelayCell.digest` field is present but unused** — always serialized as `0`, never computed or checked. Don't assume it provides any integrity guarantee; AES-CTR alone (no MAC) means there's no cell-level authenticated encryption in the current implementation. This is a real gap, not an oversight to silently "fix" without understanding the broader implications for wire compatibility.
-- **HS descriptor gossip gap**: `GossipMessage::Update` only carries `Vec<RelayDescriptor>`. If you're asked to "fix" cross-relay `.root` resolution, the actual work is adding HS descriptors to the gossip payload (and directory merge logic for them, mirroring `Directory::add_relay`'s timestamp-based dedup) — `HiddenServiceDescriptor` doesn't even have a `last_updated` field today, so that would need adding too.
+- **`Directory::add_relay` only logs on genuinely new relays** (lib.rs, checks `!write_guard.contains_key(&descriptor.id)` before the existing timestamp-based dedup/update logic) — a deliberate fix after a session where "nothing new in the logs" was misread as a hang when gossip was actually working fine and just silent on every success. If you touch this function, keep that log line; it's load-bearing for operator sanity, not decorative.
+- **`HiddenServiceDescriptor` still has no `last_updated` field** — `Directory::publish_hidden_service` always overwrites unconditionally on signature-valid receipt (no staleness/replay protection), unlike `add_relay`'s timestamp comparison. Worth fixing if HS descriptor replay/staleness ever becomes a concrete concern.
 - **Windows key-file permissions are a no-op** — `load_or_create_signing_key`'s `chmod 600` is `#[cfg(unix)]` only. No ACL hardening happens on Windows.
 
 ## Known incomplete/gap list (terse, see security-model.md for prose)
 
-- TLS TOFU bootstrap gap on first contact — `connect_to_peer`, lib.rs ~738-751
-- HS rendezvous has no per-connection Begin/Connected — target port not client-controlled — `handle_introduce2`, lib.rs ~1476-1540
-- HS descriptor gossip not implemented across relays — `GossipMessage::Update` only carries `RelayDescriptor` — lib.rs ~483, `start_gossip_task` ~1680-1707
-- No IPv6 — `establish_circuit` extend payload (~1415-1417), `ExitPolicy::is_allowed` (IPv4-only matcher), SOCKS `.root` path `rp_ipv4` extraction (~1175-1182)
+- TLS TOFU bootstrap gap on first contact — **partially closed** for pinned `BOOTSTRAP_NODES` entries (`ip:port@identity`, see `get_bootstrap_nodes`/`gossip_with_addr` above), still open for peers you have no pre-shared identity for — `connect_to_peer_inner`, lib.rs 763-777
+- HS rendezvous has no per-connection Begin/Connected — target port not client-controlled — `handle_introduce2`, lib.rs 1505-1575
+- No IPv6 — `establish_circuit` extend payload, `ExitPolicy::is_allowed` (IPv4-only matcher), SOCKS `.root` path `rp_ipv4` extraction
 - No cell-level MAC/digest — `RelayCell.digest` unused, zero-IV AES-CTR only
 - No traffic padding / timing-correlation defense anywhere in the codebase
-- No multi-node integration test (see Testing below)
 - No third-party security review
 - `Directory` has no expiry/GC for stale relay descriptors — dead relays linger indefinitely
+- `HiddenServiceDescriptor` has no `last_updated`/replay protection (see invariants above)
+
+**Fixed since the previous pass of this doc** (kept here so nobody re-discovers these from scratch): HS descriptor gossip now works across relays (`GossipMessage::Update` carries both `Vec<RelayDescriptor>` and `Vec<HiddenServiceDescriptor>`); `client`/`hs` processes now actually sync their directory via `start_directory_sync_task` (previously they ran no sync task at all); HS intro-point selection now retries every 15s instead of running once and never again; relays no longer advertise an unreachable `0.0.0.0` external address (`--external-addr` flag added); a multi-node Docker integration test now exists (`tests/integration/gossip_and_rendezvous_test.sh`, wired into CI).
 - Metrics endpoint (`start_metrics_server`) is unauthenticated plaintext HTTP
 
 ## Testing
 
-`cargo test` — 7 unit tests, all in `#[cfg(test)] mod tests` at the bottom of `src/lib.rs` (~1810-1897):
+`cargo test` — 7 unit tests, all in `#[cfg(test)] mod tests` at the bottom of `src/lib.rs` (1988-2074):
 
 1. `test_packet_framing` — `Packet::encapsulate`/`decapsulate` round-trip via an in-memory cursor.
 2. `test_directory_logic` — `Directory::add_relay`: accepts new, rejects exact duplicate (same timestamp), accepts a re-signed descriptor with a newer timestamp.
@@ -201,4 +209,4 @@ start_socks_proxy: target ends with ".root"
 6. `test_exit_policy_rejects_bad_syntax` — malformed action keyword, bad IP, bad port all produce `Err`.
 7. `test_root_resolution` — round-trips a dummy all-zero key through address derivation and `resolve_root_domain`.
 
-**Not covered — tracked gap:** no multi-node/multi-process integration test exercising real circuit establishment, gossip propagation between separate processes, or the full rendezvous handshake end-to-end. All verification of those paths today is manual (running the Docker testnet and reading logs). If asked to add test coverage, this is the highest-value gap to fill — consider a test harness that spawns multiple `tokio` tasks each with their own `Directory`/`CircuitManager` (in-process, avoiding real sockets where possible) to exercise `establish_circuit` → `Begin`/`Data` and the full rendezvous chain without needing real Docker infra.
+**Multi-node coverage:** `tests/integration/gossip_and_rendezvous_test.sh` — real Docker containers, not in-process mocks. Covers: a hidden service started cold (no relay reachable yet) recovering via retry once one appears; a relay learning a HS descriptor via gossip through an intermediate relay without ever contacting the HS directly; a bootstrap peer with a correctly-pinned identity being accepted; a bootstrap peer with an incorrectly-pinned identity having its entire response discarded. Wired into GitHub Actions (`.github/workflows/integration-test.yml`), runs on every push/PR. This exists specifically because every one of the bugs it checks for was first discovered by hand, the hard way, and cargo test alone would never have caught any of them — if you add a new cross-process behavior, add a scenario here rather than trusting unit tests to cover it.

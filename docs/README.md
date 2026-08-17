@@ -13,6 +13,11 @@ Two audiences, two sets of docs:
 
 Start with `architecture.md` if you're evaluating the project; jump straight to `operator-guide.md` if you just want to run something.
 
+## Testing
+
+- `cargo test` — unit tests, single-process only (packet framing, directory logic, `.root` resolution, exit-policy parsing).
+- **[tests/integration/gossip_and_rendezvous_test.sh](../tests/integration/gossip_and_rendezvous_test.sh)** — multi-node integration test using real Docker containers. Proves gossip actually propagates a hidden-service descriptor *through* an intermediate relay to a node that never contacted the HS directly, and that a hidden service started before any relay exists recovers via retry once one appears. This exact scenario caught three real bugs during development that `cargo test` never could (see the script's header comment). Runs automatically in CI (`.github/workflows/integration-test.yml`) on every push/PR; run it locally with `bash tests/integration/gossip_and_rendezvous_test.sh` (requires Docker).
+
 ## For AI coding agents
 
 - **[AI_REFERENCE.md](AI_REFERENCE.md)** — dense, grep-friendly technical index: file map, line ranges, data structure invariants, control-flow chains, crypto call sites, known gotchas, and test coverage. Read this before editing `src/lib.rs` or `src/main.rs`.
